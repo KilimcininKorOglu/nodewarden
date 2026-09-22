@@ -53,6 +53,12 @@ jobs:
                 const c = require("/tmp/config.json");
                 if (c.object !== "config") throw new Error("unexpected payload: " + JSON.stringify(c).slice(0, 200));
                 if (!c.environment || !c.environment.vault) throw new Error("config has no environment.vault");
+                // This fork adds mutual-tls so the Android client shows its client-certificate
+                // screen. An upstream merge that rewrites featureStates could drop it silently,
+                // and the only symptom would be a missing screen on one platform.
+                if (c.featureStates?.["mutual-tls"] !== true) {
+                  throw new Error("featureStates is missing mutual-tls; an upstream merge probably dropped it");
+                }
                 console.log("config ok, version " + c.version);
               '
               exit 0
