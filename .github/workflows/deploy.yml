@@ -1,0 +1,64 @@
+name: Deploy to Cloudflare Workers
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-workers
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Normalize lockfile registry
+        run: node scripts/normalize-lock.cjs
+
+      - name: Install dependencies
+        run: npm ci --registry=https://registry.npmjs.org
+
+      - name: Deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npm run deploy:kv
+
+      - name: Smoke test
+        env:
+          VAULT_URL: ${{ vars.VAULT_URL }}
+        run: |
+          set -euo pipefail
+          url="${VAULT_URL:-https://cuzdan.keremgok.tr}"
+          echo "Probing ${url}/api/config"
+          for attempt in 1 2 3 4 5; do
+            code=$(curl -sS -o /tmp/config.json -w '%{http_code}' "${url}/api/config" || echo 000)
+            if [ "$code" = "200" ]; then
+              node -e '
+                const c = require("/tmp/config.json");
+                if (c.object !== "config") throw new Error("unexpected payload: " + JSON.stringify(c).slice(0, 200));
+                if (!c.environment || !c.environment.vault) throw new Error("config has no environment.vault");
+                console.log("config ok, version " + c.version);
+              '
+              exit 0
+            fi
+            echo "attempt ${attempt}: HTTP ${code}, retrying in 10s"
+            sleep 10
+          done
+          echo "Smoke test failed: /api/config never returned 200"
+          exit 1
