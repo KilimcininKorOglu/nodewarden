@@ -42,12 +42,32 @@ jobs:
       - name: Smoke test
         env:
           VAULT_URL: ${{ vars.VAULT_URL }}
+          MTLS_CLIENT_CERT: ${{ secrets.MTLS_CLIENT_CERT }}
+          MTLS_CLIENT_KEY: ${{ secrets.MTLS_CLIENT_KEY }}
         run: |
           set -euo pipefail
           url="${VAULT_URL:-https://cuzdan.keremgok.tr}"
+
+          # The vault sits behind mTLS at the Cloudflare edge, so this job needs its
+          # own client certificate. Without one every probe below would be a 403 and
+          # the test would say nothing about whether the Worker actually came up.
+          umask 077
+          printf '%s' "$MTLS_CLIENT_CERT" > /tmp/ci.crt
+          printf '%s' "$MTLS_CLIENT_KEY" > /tmp/ci.key
+          curl_mtls() { curl -sS --cert /tmp/ci.crt --key /tmp/ci.key "$@"; }
+
+          # mTLS must actually reject an uncertified request. A rule that silently
+          # stops matching would leave the vault open with every other check green.
+          bare=$(curl -sS -o /dev/null -w '%{http_code}' "${url}/api/config" || echo 000)
+          if [ "$bare" != "403" ]; then
+            echo "mTLS is not enforcing: /api/config without a certificate returned ${bare}, expected 403"
+            exit 1
+          fi
+          echo "mTLS enforced (uncertified request blocked)"
+
           echo "Probing ${url}/api/config"
           for attempt in 1 2 3 4 5; do
-            code=$(curl -sS -o /tmp/config.json -w '%{http_code}' "${url}/api/config" || echo 000)
+            code=$(curl_mtls -o /tmp/config.json -w '%{http_code}' "${url}/api/config" || echo 000)
             if [ "$code" = "200" ]; then
               node -e '
                 const c = require("/tmp/config.json");
@@ -68,3 +88,19 @@ jobs:
           done
           echo "Smoke test failed: /api/config never returned 200"
           exit 1
+
+      - name: Ensure the workers.dev route stays closed
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          # workers.dev bypasses the zone, and with it the mTLS rule. A deploy that
+          # re-enables that route would reopen the vault to the whole internet while
+          # every other check still passes.
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            https://nodewarden.hermesthecat.workers.dev/api/config || echo 000)
+          if [ "$code" = "200" ]; then
+            echo "workers.dev is serving the vault and bypasses mTLS; disable it in the Worker settings"
+            exit 1
+          fi
+          echo "workers.dev closed (HTTP ${code})"
