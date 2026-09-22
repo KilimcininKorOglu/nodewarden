@@ -37,7 +37,11 @@ jobs:
       - name: Deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: npm run deploy:kv
+        # ensure-d1.cjs runs as its own step instead of inside the deploy:kv
+        # script, so package.json keeps upstream's value and cannot conflict.
+        run: |
+          node scripts/ensure-d1.cjs
+          npm run deploy:kv
 
       - name: Smoke test
         env:
