@@ -22,7 +22,7 @@
     "test:webauthn-connector": "node --test scripts/webauthn-connector.test.mjs && tsx --test scripts/webauthn-connector-headers.test.ts",
     "test:webauthn-connectors": "node --test scripts/webauthn-mobile-connector.test.mjs scripts/webauthn-connector.test.mjs && tsx --test scripts/webauthn-connector-headers.test.ts",
     "deploy": "wrangler deploy",
-    "deploy:kv": "node scripts/ensure-kv.cjs && wrangler deploy -c wrangler.kv.toml",
+    "deploy:kv": "node scripts/ensure-d1.cjs && node scripts/ensure-kv.cjs && wrangler deploy -c wrangler.kv.toml",
     "deploy:demo": "npm run build:demo && wrangler pages deploy dist --project-name nw-demo"
   },
   "keywords": [
@@ -80,5 +80,10 @@
     "preact": "^10.29.3",
     "qrcode-generator": "^2.0.4",
     "wouter": "^3.10.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "workerd@1.20260625.1": true,
+    "fsevents@2.3.3": true
   }
 }
