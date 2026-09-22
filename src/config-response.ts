@@ -41,6 +41,7 @@ export function buildConfigResponse(origin: string) {
       'duo-redirect': true,
       'email-verification': true,
       'fill-assist-targeting-rules': true,
+      'mutual-tls': true,
       'pm-19051-send-email-verification': false,
       'pm-19148-innovation-archive': true,
       'pm-4516-devices-add-last-activity-date': true,
