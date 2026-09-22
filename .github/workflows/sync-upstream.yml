@@ -2,7 +2,7 @@ name: Sync upstream
 
 on:
   schedule:
-    - cron: "23 5 * * *"
+    - cron: "23 */6 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -15,6 +15,10 @@ permissions:
 
 env:
   UPSTREAM: https://github.com/shuaiplus/nodewarden.git
+  # Files this fork changes. A conflict in one of them is resolved by taking
+  # upstream's copy wholesale and re-applying the fork changes with
+  # scripts/apply-fork-patches.cjs, so upstream's work is never dropped.
+  FORK_OWNED: "package.json package-lock.json wrangler.kv.toml src/config-response.ts"
 
 jobs:
   sync:
@@ -24,6 +28,10 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
 
       - name: Configure git
         run: |
@@ -50,49 +58,114 @@ jobs:
           git merge --no-edit upstream/main
           status=$?
           set -e
-          if [ $status -ne 0 ]; then
-            # The lockfile conflicts on every upstream dependency bump because this
-            # fork rewrites its registry host. Take upstream's lockfile wholesale
-            # and re-apply the rewrite, so only real code conflicts stop the sync.
-            if [ "$(git diff --name-only --diff-filter=U)" = "package-lock.json" ]; then
-              git checkout --theirs package-lock.json
-              node scripts/normalize-lock.cjs
-              git add package-lock.json
-              git commit --no-edit
-              echo "resolved=lockfile" >> "$GITHUB_OUTPUT"
-            else
-              conflicts=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
-              git merge --abort
-              echo "conflicts=${conflicts}" >> "$GITHUB_OUTPUT"
-              echo "resolved=no" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          else
+          if [ $status -eq 0 ]; then
             echo "resolved=clean" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
+          conflicts=$(git diff --name-only --diff-filter=U)
+          foreign=""
+          for f in $conflicts; do
+            case " $FORK_OWNED " in
+              *" $f "*) ;;
+              *) foreign="${foreign}${f} " ;;
+            esac
+          done
+
+          if [ -n "$foreign" ]; then
+            git merge --abort
+            echo "conflicts=$(echo $conflicts | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+            echo "foreign=${foreign}" >> "$GITHUB_OUTPUT"
+            echo "resolved=no" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Every conflict is in a file this fork owns. Take upstream's copy;
+          # the next step writes the fork changes back on top of it.
+          for f in $conflicts; do
+            git checkout upstream/main -- "$f"
+            git add "$f"
+          done
+          echo "resolved=autoresolved" >> "$GITHUB_OUTPUT"
+          echo "conflicts=$(echo $conflicts | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+
+      - name: Re-apply fork patches
+        if: steps.merge.outputs.resolved == 'clean' || steps.merge.outputs.resolved == 'autoresolved'
+        run: |
+          node scripts/normalize-lock.cjs
+          node scripts/apply-fork-patches.cjs
+
+          # A clean merge can still drop a fork change without a conflict, for
+          # example when upstream rewrites the whole featureStates object.
+          if [ -n "$(git diff --name-only)" ]; then
+            git add $FORK_OWNED
+          fi
+
+          if [ -f .git/MERGE_HEAD ]; then
+            git commit --no-edit
+          elif [ -n "$(git diff --cached --name-only)" ]; then
+            git commit -m "chore: re-apply fork patches after upstream merge"
+          fi
+
+      - name: Verify fork patches survived the merge
+        if: steps.merge.outputs.resolved == 'clean' || steps.merge.outputs.resolved == 'autoresolved'
+        run: node scripts/apply-fork-patches.cjs --check
+
       - name: Push merged changes
-        if: steps.merge.outputs.resolved == 'clean' || steps.merge.outputs.resolved == 'lockfile'
+        if: steps.merge.outputs.resolved == 'clean' || steps.merge.outputs.resolved == 'autoresolved'
         run: git push origin main
 
-      - name: Open issue on conflict
+      - name: Close a stale conflict issue
+        if: steps.merge.outputs.resolved == 'clean' || steps.merge.outputs.resolved == 'autoresolved'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          existing=$(gh issue list --state open --label upstream-sync --limit 1 --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue close "$existing" --comment "The upstream sync merged and pushed successfully, so this is resolved."
+          fi
+
+      - name: Report an unresolvable conflict
         if: steps.merge.outputs.resolved == 'no'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+          FOREIGN: ${{ steps.merge.outputs.foreign }}
           BEHIND: ${{ steps.check.outputs.behind }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           {
-            printf 'The scheduled upstream sync could not merge `upstream/main`. The merge was aborted, so `main` is unchanged and nothing was deployed.\n\n'
-            printf '**Commits behind upstream:** %s\n' "$BEHIND"
-            printf '**Conflicting files:** `%s`\n\n' "$CONFLICTS"
+            printf 'The scheduled upstream sync could not merge `upstream/main`. The merge was aborted, so `main` is unchanged and nothing was deployed. **The vault is running older code than upstream until this is resolved.**\n\n'
+            printf '| | |\n|---|---|\n'
+            printf '| Commits behind upstream | %s |\n' "$BEHIND"
+            printf '| Conflicting files | `%s` |\n' "$CONFLICTS"
+            printf '| Not auto-resolvable | `%s` |\n' "$FOREIGN"
+            printf '| Run | %s |\n\n' "$RUN_URL"
+            printf 'Conflicts in the fork-owned files are resolved automatically. The files above are outside that set, so upstream changed something this fork also changed in a way no script can reconcile.\n\n'
             printf 'Resolve locally:\n\n'
             printf '    git fetch upstream main\n'
             printf '    git merge upstream/main\n'
             printf '    # resolve the conflicts, then\n'
+            printf '    node scripts/apply-fork-patches.cjs --check\n'
             printf '    git push origin main\n\n'
             printf 'The push triggers the deploy workflow.\n'
           } > /tmp/issue-body.md
-          gh issue create \
-            --title "Upstream sync blocked by merge conflict" \
-            --body-file /tmp/issue-body.md
+
+          gh label create upstream-sync --color B60205 --description "Upstream sync is blocked" 2>/dev/null || true
+
+          existing=$(gh issue list --state open --label upstream-sync --limit 1 --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file /tmp/issue-body.md
+            gh issue edit "$existing" --title "Upstream sync blocked: ${BEHIND} commit(s) behind"
+          else
+            gh issue create \
+              --label upstream-sync \
+              --title "Upstream sync blocked: ${BEHIND} commit(s) behind" \
+              --body-file /tmp/issue-body.md
+          fi
+
+          # Fail the run so the red check and its notification reach the owner.
+          # A green run for a blocked sync is how an unapplied upstream fix
+          # goes unnoticed for days.
+          echo "::error::Upstream sync is blocked; ${BEHIND} commit(s) are not merged."
+          exit 1
