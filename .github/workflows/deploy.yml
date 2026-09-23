@@ -74,9 +74,10 @@ jobs:
           fi
           echo "mTLS enforced (uncertified request blocked)"
 
-          # Over HTTP/3 the client certificate is not verified, so a browser that
-          # upgrades through Alt-Svc gets 403 on every request. An h3 Alt-Svc
-          # header means someone turned HTTP/3 back on for the zone.
+          # The edge verifies client certificates over HTTP/3, but Firefox sends
+          # none on a QUIC connection, so once it upgrades through Alt-Svc it
+          # gets 403 on every request. An h3 Alt-Svc header means someone turned
+          # HTTP/3 back on for the zone.
           alt=$(curl_mtls -o /dev/null -D - "${url}/api/config" | tr -d '\r' | awk 'tolower($1)=="alt-svc:"{print}')
           if printf '%s' "$alt" | grep -q 'h3'; then
             echo "HTTP/3 is advertised (${alt}); turn HTTP/3 off for the zone, it breaks mTLS clients"
