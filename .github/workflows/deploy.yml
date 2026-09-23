@@ -74,6 +74,16 @@ jobs:
           fi
           echo "mTLS enforced (uncertified request blocked)"
 
+          # Over HTTP/3 the client certificate is not verified, so a browser that
+          # upgrades through Alt-Svc gets 403 on every request. An h3 Alt-Svc
+          # header means someone turned HTTP/3 back on for the zone.
+          alt=$(curl_mtls -o /dev/null -D - "${url}/api/config" | tr -d '\r' | awk 'tolower($1)=="alt-svc:"{print}')
+          if printf '%s' "$alt" | grep -q 'h3'; then
+            echo "HTTP/3 is advertised (${alt}); turn HTTP/3 off for the zone, it breaks mTLS clients"
+            exit 1
+          fi
+          echo "HTTP/3 not advertised"
+
           echo "Probing ${url}/api/config"
           for attempt in 1 2 3 4 5; do
             code=$(curl_mtls -o /tmp/config.json -w '%{http_code}' "${url}/api/config" || echo 000)
