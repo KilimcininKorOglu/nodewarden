@@ -10,6 +10,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: write
   contents: write
   issues: write
 
@@ -114,6 +115,15 @@ jobs:
       - name: Push merged changes
         if: steps.merge.outputs.resolved == 'clean' || steps.merge.outputs.resolved == 'autoresolved'
         run: git push origin main
+
+      - name: Deploy the merged code
+        if: steps.merge.outputs.resolved == 'clean' || steps.merge.outputs.resolved == 'autoresolved'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # A push made with GITHUB_TOKEN starts no other workflow, so the push
+        # above never triggers deploy.yml and the merge would sit undeployed.
+        # workflow_dispatch is the one event GITHUB_TOKEN is allowed to start.
+        run: gh workflow run deploy.yml --ref main
 
       - name: Close a stale conflict issue
         if: steps.merge.outputs.resolved == 'clean' || steps.merge.outputs.resolved == 'autoresolved'
