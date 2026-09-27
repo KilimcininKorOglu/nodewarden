@@ -65,6 +65,7 @@ jobs:
           fi
 
           conflicts=$(git diff --name-only --diff-filter=U)
+          conflict_list=$(printf '%s' "$conflicts" | tr '\n' ' ')
           foreign=""
           for f in $conflicts; do
             case " $FORK_OWNED " in
@@ -75,9 +76,11 @@ jobs:
 
           if [ -n "$foreign" ]; then
             git merge --abort
-            echo "conflicts=$(echo $conflicts | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
-            echo "foreign=${foreign}" >> "$GITHUB_OUTPUT"
-            echo "resolved=no" >> "$GITHUB_OUTPUT"
+            {
+              echo "conflicts=${conflict_list}"
+              echo "foreign=${foreign}"
+              echo "resolved=no"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -87,8 +90,10 @@ jobs:
             git checkout upstream/main -- "$f"
             git add "$f"
           done
-          echo "resolved=autoresolved" >> "$GITHUB_OUTPUT"
-          echo "conflicts=$(echo $conflicts | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+          {
+            echo "resolved=autoresolved"
+            echo "conflicts=${conflict_list}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Re-apply fork patches
         if: steps.merge.outputs.resolved == 'clean' || steps.merge.outputs.resolved == 'autoresolved'
@@ -99,7 +104,8 @@ jobs:
           # A clean merge can still drop a fork change without a conflict, for
           # example when upstream rewrites the whole featureStates object.
           if [ -n "$(git diff --name-only)" ]; then
-            git add $FORK_OWNED
+            read -r -a owned <<< "$FORK_OWNED"
+            git add -- "${owned[@]}"
           fi
 
           if [ -f .git/MERGE_HEAD ]; then
@@ -144,24 +150,36 @@ jobs:
           BEHIND: ${{ steps.check.outputs.behind }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # Quoted heredocs keep the Markdown backticks literal; only the table
+          # rows interpolate values, and they go through printf.
           {
-            printf 'The scheduled upstream sync could not merge `upstream/main`. The merge was aborted, so `main` is unchanged and nothing was deployed. **The vault is running older code than upstream until this is resolved.**\n\n'
-            printf '| | |\n|---|---|\n'
+            cat <<'EOF'
+          The scheduled upstream sync could not merge `upstream/main`. The merge was aborted, so `main` is unchanged and nothing was deployed. **The vault is running older code than upstream until this is resolved.**
+
+          | | |
+          |---|---|
+          EOF
             printf '| Commits behind upstream | %s |\n' "$BEHIND"
-            printf '| Conflicting files | `%s` |\n' "$CONFLICTS"
-            printf '| Not auto-resolvable | `%s` |\n' "$FOREIGN"
+            printf '| Conflicting files | %s |\n' "$CONFLICTS"
+            printf '| Not auto-resolvable | %s |\n' "$FOREIGN"
             printf '| Run | %s |\n\n' "$RUN_URL"
-            printf 'Conflicts in the fork-owned files are resolved automatically. The files above are outside that set, so upstream changed something this fork also changed in a way no script can reconcile.\n\n'
-            printf 'Resolve locally:\n\n'
-            printf '    git fetch upstream main\n'
-            printf '    git merge upstream/main\n'
-            printf '    # resolve the conflicts, then\n'
-            printf '    node scripts/apply-fork-patches.cjs --check\n'
-            printf '    git push origin main\n\n'
-            printf 'The push triggers the deploy workflow.\n'
+            cat <<'EOF'
+          Conflicts in the fork-owned files are resolved automatically. The files above are outside that set, so upstream changed something this fork also changed in a way no script can reconcile.
+
+          Resolve locally:
+
+              git fetch upstream main
+              git merge upstream/main
+              # resolve the conflicts, then
+              node scripts/apply-fork-patches.cjs --check
+              git push origin main
+
+          The push triggers the deploy workflow.
+          EOF
           } > /tmp/issue-body.md
 
-          gh label create upstream-sync --color B60205 --description "Upstream sync is blocked" 2>/dev/null || true
+          # --force updates the label when it already exists instead of failing.
+          gh label create upstream-sync --color B60205 --description "Upstream sync is blocked" --force
 
           existing=$(gh issue list --state open --label upstream-sync --limit 1 --json number --jq '.[0].number // empty')
           if [ -n "$existing" ]; then
